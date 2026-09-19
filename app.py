@@ -32,21 +32,27 @@ def _norm(s):
 
 ALIASES = {
     "pages": {
+        # OnCrawl + Screaming Frog (FR/EN). Les intitulés sont comparés après normalisation (accents/casse retirés).
         "url": ["url", "address", "adresse", "page", "full url"],
         "inrank": ["inrank", "in rank", "internal pagerank", "pagerank interne", "pagerank", "link score", "popularity", "prank"],
-        "depth": ["depth", "crawl depth", "profondeur", "niveau", "depth level"],
-        "status_code": ["status code", "status", "http code", "code", "http status", "response code"],
-        "indexable": ["indexable", "indexability", "index status", "is indexable"],
+        "depth": ["depth", "crawl depth", "crawl profondeur", "profondeur", "niveau", "depth level", "profondeur du dossier"],
+        "status_code": ["status code", "status", "http code", "code http", "code", "http status", "response code", "code de statut"],
+        "indexable": ["indexable", "indexability", "indexabilite", "index status", "is indexable", "statut d indexabilite"],
         "word_count": ["word count", "words", "nb words", "wordcount", "mots", "nombre de mots"],
         "title": ["title", "title 1", "titre", "page title", "meta title"],
         "h1": ["h1", "h1 1", "h1 tag", "premier h1"],
+        "content_type": ["content type", "type de contenu", "contenttype", "mime type"],
     },
     "links": {
+        # OnCrawl : origin/target/anchor/follow/origin_position/intern.
+        # Screaming Frog (export All Inlinks / Tous les liens entrants) : Source/Destination/Ancrage/Suivre/Position du lien/Type.
         "source": ["origin", "source", "from", "source url", "url source", "origin url", "src"],
         "target": ["target", "destination", "to", "target url", "url cible", "dest", "cible"],
-        "anchor": ["anchor", "anchor text", "ancre", "texte ancre", "texte de lien", "link text"],
-        "follow": ["follow", "nofollow", "rel", "follow type", "link follow", "dofollow"],
-        "position": ["origin position", "link position", "position", "link type", "emplacement", "link location", "location"],
+        "anchor": ["anchor", "anchor text", "ancre", "ancrage", "texte ancre", "texte de lien", "link text", "texte alt"],
+        "follow": ["follow", "nofollow", "suivre", "rel", "follow type", "link follow", "dofollow"],
+        "position": ["origin position", "position du lien", "link position", "position", "emplacement", "link location", "location"],
+        "link_type": ["type", "type de lien", "lien type", "link type"],
+        "intern": ["intern", "internal", "interne"],
         "target_indexable": ["target meta robots index", "target indexable", "target index", "target is index"],
     },
     "gsc": {
@@ -76,7 +82,7 @@ REQUIRED = {
     "ga4": ["url", "sessions", "conversions"],
     "sem": ["keyword", "volume", "target_url"],
 }
-LABELS = {"pages": "OnCrawl Pages", "links": "OnCrawl Links", "gsc": "GSC", "ga4": "GA4", "sem": "Sémantique"}
+LABELS = {"pages": "Crawl Pages", "links": "Crawl Links", "gsc": "GSC", "ga4": "GA4", "sem": "Sémantique"}
 
 
 def guess_mapping(columns, kind):
@@ -185,7 +191,8 @@ if not _check_password():
     st.stop()
 
 st.title("🔗 Audit de maillage interne")
-st.caption("Pipeline OnCrawl → diagnostic 2 axes → prescription de liens → livrable Excel. PageRank interne = InRank OnCrawl.")
+st.caption("Crawl (OnCrawl ou Screaming Frog) → diagnostic 2 axes → prescription de liens → livrables Excel + PPT. "
+           "PageRank interne = InRank (OnCrawl) ou Link Score (Screaming Frog).")
 
 # --------------------------------------------------------------------------
 # Sidebar : seuils
@@ -230,8 +237,8 @@ def source_input(kind, label):
     return None
 
 sources = {}
-sources["pages"] = source_input("pages", "OnCrawl — Pages (obligatoire)")
-sources["links"] = source_input("links", "OnCrawl — Links / Inlinks (obligatoire)")
+sources["pages"] = source_input("pages", "Pages — OnCrawl (export Pages) ou Screaming Frog (Interne : Tous) — obligatoire")
+sources["links"] = source_input("links", "Liens — OnCrawl (export Links) ou Screaming Frog (Tous les liens entrants) — obligatoire")
 sources["gsc"] = source_input("gsc", "Search Console — Pages (recommandé)")
 with st.expander("Sources optionnelles (GA4, étude sémantique)"):
     sources["ga4"] = source_input("ga4", "GA4 — Pages (optionnel)")
@@ -240,7 +247,7 @@ with st.expander("Sources optionnelles (GA4, étude sémantique)"):
 sources = {k: v for k, v in sources.items() if v is not None}
 
 if "pages" not in sources or "links" not in sources:
-    st.info("Fournis au minimum les deux exports OnCrawl (Pages + Links) pour démarrer.")
+    st.info("Fournis au minimum les deux exports de crawl (Pages + Liens), OnCrawl ou Screaming Frog, pour démarrer.")
     st.stop()
 
 # --------------------------------------------------------------------------

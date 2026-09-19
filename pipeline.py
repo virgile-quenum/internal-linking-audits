@@ -16,6 +16,7 @@ Tous les seuils sont dans DEFAULT_CONFIG et surchargés depuis l'app.
 from __future__ import annotations
 import re
 import logging
+import unicodedata
 from urllib.parse import urlsplit, urlunsplit
 
 import numpy as np
@@ -46,11 +47,12 @@ GENERIC_ANCHORS = {
 }
 
 POSITION_MAP = {
+    # anglais + OnCrawl
     "content": "Content", "contenu": "Content", "body": "Content", "main": "Content",
     "navigation": "Navigation", "nav": "Navigation", "menu": "Navigation",
-    "header": "Header", "entete": "Header", "en-tete": "Header", "top": "Header",
-    "footer": "Footer", "pied": "Footer", "bottom": "Footer",
-    "sidebar": "Sidebar", "aside": "Sidebar", "lateral": "Sidebar",
+    "header": "Header", "entete": "Header", "en tete": "Header", "top": "Header", "tete": "Header",
+    "footer": "Footer", "pied": "Footer", "bottom": "Footer", "pied de page": "Footer",
+    "sidebar": "Sidebar", "aside": "Sidebar", "lateral": "Sidebar", "auxiliaire": "Sidebar",
 }
 
 
@@ -83,10 +85,15 @@ def normalize_url(u, cfg):
     return urlunsplit((scheme, netloc, path, query, ""))
 
 
+def _strip_accents(s):
+    return "".join(c for c in unicodedata.normalize("NFD", s) if unicodedata.category(c) != "Mn")
+
+
 def normalize_position(p):
     if not isinstance(p, str):
         return "Content"
-    key = p.strip().lower()
+    key = _strip_accents(p.strip().lower()).replace("-", " ").replace("_", " ").strip()
+    key = re.sub(r"\s+", " ", key)
     return POSITION_MAP.get(key, "Content" if key in ("", "nan") else p.strip().capitalize())
 
 
@@ -688,8 +695,34 @@ def run_pipeline(pages, links, gsc=None, ga4=None, sem=None,
     cfg = {**DEFAULT_CONFIG, **(cfg or {})}
     report = {}
 
+    # Phase 0 - filtrage source de crawl (OnCrawl a une colonne 'intern' ; Screaming Frog a
+    # une colonne 'link_type' = Hyperlien/Image/CSS/JS...). On ne garde que les vrais hyperliens
+    # internes. Les liens externes restants sont écartés plus loin (cible absente des pages).
+    links = links.copy()
+    report["_liens_deposes"] = len(links)
+    if "link_type" in links.columns:
+        lt = links["link_type"].astype(str).map(_strip_accents).str.lower()
+        keep = lt.str.contains("hyperl", na=False) | lt.isin(["", "nan", "hyperlink", "hyperlien"])
+        links = links[keep]
+    if "intern" in links.columns:
+        it = links["intern"].astype(str).str.lower()
+        links = links[~it.isin(["external", "externe", "0", "false", "no", "non"])]
+    report["liens_hyperliens_internes"] = len(links)
+
     # Phase 1 - préparation
     pages = pages.copy()
+    # Screaming Frog "Interne : Tous" liste TOUTES les ressources (images, CSS, JS...).
+    # On ne garde que les pages HTML si la colonne type de contenu est fournie.
+    if "content_type" in pages.columns:
+        _ct = pages["content_type"].astype(str).str.lower()
+        pages = pages[_ct.str.contains("html", na=False) | _ct.isin(["", "nan", "none"])]
+    # Ne garder que les pages indexables si l'info est fournie (écarte URL à paramètres, noindex,
+    # redirections... surtout utile pour Screaming Frog dont l'export liste tout).
+    if "indexable" in pages.columns:
+        _ix = pages["indexable"].astype(str).map(_strip_accents).str.lower()
+        _known = _ix.str.contains("index", na=False)
+        _bad = _ix.str.contains("non", na=False) | _ix.isin(["false", "no", "0", "noindex"])
+        pages = pages[(~_known) | (_known & ~_bad)]
     pages["url"] = pages["url"].map(lambda u: normalize_url(u, cfg))
     pages = pages.dropna(subset=["url"])
     pages["status_code"] = pd.to_numeric(pages.get("status_code", 200), errors="coerce").fillna(200)
