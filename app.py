@@ -221,6 +221,30 @@ st.subheader("1. Indiquer les exports")
 st.caption("Upload pour les fichiers légers. Pour un export volumineux (> 500 Mo, millions de liens), "
            "colle plutôt le chemin local du fichier : lecture directe depuis le disque, sans upload navigateur.")
 
+with st.expander("📄 Quels fichiers fournir ? (OnCrawl ou Screaming Frog, FR/EN)"):
+    st.markdown(
+        "**2 fichiers de crawl obligatoires** (Pages + Liens), au choix OnCrawl **ou** Screaming Frog. "
+        "GSC recommandée, sémantique et GA4 optionnelles. Les colonnes sont détectées automatiquement "
+        "(français ou anglais) et corrigeables à l'écran.\n\n"
+        "**Crawl (obligatoire)**\n\n"
+        "| Source | Fichier à exporter | Ce que l'outil y lit |\n"
+        "|---|---|---|\n"
+        "| OnCrawl | Export **Pages** | url, InRank, profondeur, code HTTP |\n"
+        "| OnCrawl | Export **Links** (tous les liens, sans plafond) | origin, target, ancre, follow, emplacement, intern |\n"
+        "| Screaming Frog | Onglet **Interne → Tous** (Internal: All) | Adresse, Link Score, Crawl profondeur, Code HTTP, Indexabilité |\n"
+        "| Screaming Frog | Export en masse → **Tous les liens entrants** (All Inlinks) | Source, Destination, Ancrage, Suivre, Position du lien, Type |\n\n"
+        "_Exporter l'intégralité des liens, jamais un échantillon. Sur Screaming Frog, l'outil ne garde que "
+        "les hyperliens vers des pages HTML indexables ; images, CSS, redirections et noindex sont écartés._\n\n"
+        "**Enrichissement**\n\n"
+        "| Fichier | Statut | Source / export | Colonnes utiles |\n"
+        "|---|---|---|---|\n"
+        "| Search Console | Recommandé | Performances → Pages, 3 mois | URL, Clics, Impressions, Position |\n"
+        "| Étude sémantique | Optionnel | Export mots-clés | Mot-clé, Volume, URL cible, Position |\n"
+        "| GA4 | Optionnel | Rapport Pages, 3 mois | URL, Sessions, Conversions |\n\n"
+        "**Bonnes pratiques** : sur Screaming Frog, activer le rendu JavaScript si le site en dépend ; "
+        "exporter sans filtre appliqué sur le tableau."
+    )
+
 def source_input(kind, label):
     c1, c2 = st.columns([1, 1])
     up = c1.file_uploader(label, type=["csv", "xlsx"], key=f"u_{kind}")
