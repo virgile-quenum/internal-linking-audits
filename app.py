@@ -48,7 +48,7 @@ ALIASES = {
         # Screaming Frog (export All Inlinks / Tous les liens entrants) : Source/Destination/Ancrage/Suivre/Position du lien/Type.
         "source": ["origin", "source", "from", "source url", "url source", "origin url", "src"],
         "target": ["target", "destination", "to", "target url", "url cible", "dest", "cible"],
-        "anchor": ["anchor", "anchor text", "ancre", "ancrage", "texte ancre", "texte de lien", "link text", "texte alt"],
+        "anchor": ["ancrage", "anchor", "anchor text", "ancre", "texte ancre", "texte de lien", "link text"],
         "follow": ["follow", "nofollow", "suivre", "rel", "follow type", "link follow", "dofollow"],
         "position": ["origin position", "position du lien", "link position", "position", "emplacement", "link location", "location"],
         "link_type": ["type", "type de lien", "lien type", "link type"],
@@ -125,10 +125,35 @@ def load_df(source, usecols=None, nrows=None):
             return df[keep]
         return df
 
+    def _read_excel(buf_or_path):
+        # Un export (GSC, sémantique...) peut avoir plusieurs onglets ; on choisit celui
+        # qui ressemble à un tableau d'URL plutôt que le premier (souvent un graphique).
+        xls = pd.ExcelFile(buf_or_path)
+        best, best_score = None, -1
+        for sh in xls.sheet_names:
+            try:
+                d = xls.parse(sh, nrows=30, dtype=str)
+            except Exception:
+                continue
+            if d is None or d.empty:
+                continue
+            cols = [str(c).lower() for c in d.columns]
+            score = len(d.columns) * 0.1
+            if any(("url" in c or "page" in c or "adresse" in c or "landing" in c) for c in cols):
+                score += 5
+            for c in d.columns:
+                if d[c].astype(str).str.startswith("http").mean() > 0.5:
+                    score += 5
+                    break
+            if score > best_score:
+                best, best_score = sh, score
+        sheet = best if best is not None else (xls.sheet_names[0] if xls.sheet_names else 0)
+        return xls.parse(sheet, nrows=nrows, dtype=str)
+
     if kind == "path":
         p = obj
         if _is_excel(p):
-            return _finish(pd.read_excel(p, nrows=nrows))
+            return _finish(_read_excel(p))
         with open(p, "rb") as fh:
             first = fh.readline().decode("utf-8-sig", errors="replace")
         sep = _sep_from_line(first)
@@ -139,7 +164,7 @@ def load_df(source, usecols=None, nrows=None):
         f = obj
         raw = f.getvalue()
         if _is_excel(f.name):
-            return _finish(pd.read_excel(io.BytesIO(raw), nrows=nrows))
+            return _finish(_read_excel(io.BytesIO(raw)))
         text = None
         for enc in ("utf-8-sig", "utf-8", "latin-1"):
             try:
