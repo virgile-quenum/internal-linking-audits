@@ -356,16 +356,43 @@ pages_urls = pages_urls.dropna(subset=["url"]).drop_duplicates(subset=["url"])
 if ss.cluster_mapping is None or st.button("↺ Re-proposer la segmentation"):
     ss.cluster_mapping = pl.propose_clusters(pages_urls)
 
-st.caption("Segmentation par pattern d'URL (les préfixes de langue type /fr/fr/ sont ignorés automatiquement). "
-           "Renomme ou fusionne des clusters dans la colonne « cluster », puis valide.")
-edited = st.data_editor(
-    ss.cluster_mapping, use_container_width=True, num_rows="fixed",
-    column_config={
-        "pattern": st.column_config.TextColumn("Pattern URL", disabled=True),
-        "cluster": st.column_config.TextColumn("Cluster (éditable)"),
-        "nb_pages": st.column_config.NumberColumn("Nb pages", disabled=True),
-        "exemples": st.column_config.TextColumn("Exemples", disabled=True),
-    }, key="cluster_editor")
+st.markdown("**Cibles du maillage** : choisis les types de pages à pousser et à exclure. "
+            "La typologie de chaque segment est détectée automatiquement (corrigeable plus bas).")
+_present = (sorted(ss.cluster_mapping["typologie"].dropna().unique())
+            if "typologie" in ss.cluster_mapping.columns else [])
+_opts = [t for t in pl.TYPOLOGIES if t in _present] or pl.TYPOLOGIES
+c1, c2 = st.columns(2)
+cibler = c1.multiselect("🎯 Types à cibler (recevoir des liens)", _opts,
+                        default=[t for t in _opts if t in ("Produit", "Listing/Catégorie", "Autre")])
+exclure = c2.multiselect("🚫 Types à exclure (hors scope)", _opts,
+                         default=[t for t in _opts if t in ("FAQ", "Légal", "Compte/Tunnel")])
+st.caption("Tout type non listé devient « Source » (émet des liens mais n'est pas ciblé). "
+           "« Cibler » implique aussi « peut être source ».")
+
+def _role_of(t):
+    if t in exclure:
+        return "Exclue"
+    if t in cibler:
+        return "Cible + Source"
+    return "Source"
+
+_sig = (tuple(cibler), tuple(exclure))
+if ss.get("_typo_sig") != _sig and "typologie" in ss.cluster_mapping.columns:
+    ss._typo_sig = _sig
+    ss.cluster_mapping = ss.cluster_mapping.assign(role=ss.cluster_mapping["typologie"].map(_role_of))
+
+with st.expander("Ajuster par segment (override fin, optionnel)"):
+    st.caption("Corrige le cluster, la typologie ou le rôle d'un segment précis si la détection se trompe.")
+    edited = st.data_editor(
+        ss.cluster_mapping, use_container_width=True, num_rows="fixed",
+        column_config={
+            "pattern": st.column_config.TextColumn("Pattern URL", disabled=True),
+            "cluster": st.column_config.TextColumn("Cluster"),
+            "typologie": st.column_config.SelectboxColumn("Typologie", options=pl.TYPOLOGIES, required=False),
+            "role": st.column_config.SelectboxColumn("Rôle maillage", options=pl.ROLES, required=False),
+            "nb_pages": st.column_config.NumberColumn("Nb pages", disabled=True),
+            "exemples": st.column_config.TextColumn("Exemples", disabled=True),
+        }, key="cluster_editor")
 
 # --------------------------------------------------------------------------
 # ÉTAPE 4 — Analyse (lecture complète, colonnes utiles seulement)

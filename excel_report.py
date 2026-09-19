@@ -263,6 +263,9 @@ def _sheet_plan_action(wb, results, p):
         anc = r.get("_ancres_txt", "")
         nbkw = int(pd.to_numeric(r.get("nb_kw", 0), errors="coerce") or 0)
         anchor_issue = any("Ancre" in t for t in ft)
+        # Rôle (jalon C) : les pages "Exclue" (FAQ, légal, tunnel... selon la config) sortent du plan d'action.
+        if str(r.get("role", "Cible + Source")) == "Exclue":
+            continue
 
         if tot == 0:
             action, emp, quoi = ("① Ajouter des liens", "Page invisible (0 lien entrant)",
@@ -283,11 +286,12 @@ def _sheet_plan_action(wb, results, p):
         clics = int(pd.to_numeric(r.get("clics_gsc", 0), errors="coerce") or 0) if has_clics else ""
         posv = pd.to_numeric(r.get("position_gsc"), errors="coerce") if has_clics else None
         pos = round(float(posv), 1) if posv is not None and pd.notna(posv) else ""
-        rows.append({"Page": url, "Clics GSC": clics, "Position GSC (moy.)": pos,
+        rows.append({"Page": url, "Typologie": r.get("typologie", ""), "Clics GSC": clics,
+                     "Position GSC (moy.)": pos,
                      "Mots-clés cibles (volume · position)": r.get("_kw_detail", ""),
                      "Action": action, "Emplacement": emp, "Quoi faire": quoi})
 
-    df = pd.DataFrame(rows, columns=["Page", "Clics GSC", "Position GSC (moy.)",
+    df = pd.DataFrame(rows, columns=["Page", "Typologie", "Clics GSC", "Position GSC (moy.)",
                                      "Mots-clés cibles (volume · position)", "Action", "Emplacement", "Quoi faire"])
     df = df.head(80)
     if has_clics and len(df):
@@ -304,6 +308,26 @@ def _sheet_plan_action(wb, results, p):
             for cell in row:
                 if cell.value in pf:
                     cell.fill = PatternFill("solid", fgColor=pf[cell.value])
+
+    # Maillage par typologie de page (jalon C)
+    if "typologie" in p.columns:
+        akw = dict(nb_pages=("url", "size"),
+                   role=("role", lambda s: s.astype(str).mode().iat[0] if len(s) else ""),
+                   liens_ctx_moy=("liens_ctx_entrants", "mean"),
+                   orphelines=("orpheline", "sum"))
+        if "clics_gsc" in p.columns:
+            akw["clics_gsc"] = ("clics_gsc", "sum")
+        g = p.groupby("typologie").agg(**akw).reset_index()
+        g["liens_ctx_moy"] = pd.to_numeric(g["liens_ctx_moy"], errors="coerce").round(1)
+        g["orphelines"] = pd.to_numeric(g["orphelines"], errors="coerce").fillna(0).astype(int)
+        g = g.sort_values("nb_pages", ascending=False).rename(columns={
+            "typologie": "Typologie", "role": "Rôle (maillage)", "nb_pages": "Nb pages",
+            "liens_ctx_moy": "Liens contenu entrants (moy.)", "orphelines": "Orphelines", "clics_gsc": "Clics GSC"})
+        rT = end + 2
+        ws.cell(row=rT, column=1,
+                value="Maillage par typologie de page (rôle défini à l'étape segmentation, éditable)").font = SUB_FONT
+        end = _write_df(ws, g.reset_index(drop=True), start_row=rT + 1)
+
     # bloc "vos pages fortes en maillage"
     strong = p.copy()
     if "liens_ctx_entrants" in strong.columns:

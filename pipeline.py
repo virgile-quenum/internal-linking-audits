@@ -143,9 +143,53 @@ def _make_segmenter(urls):
     return seg
 
 
+# --------------------------------------------------------------------------
+# Typologie de page (Produit / Listing / FAQ / Éditorial / Home / Légal / Compte)
+# et rôle dans le maillage (Cible / Source / Cible + Source / Exclue).
+# --------------------------------------------------------------------------
+TYPOLOGIES = ["Produit", "Listing/Catégorie", "Éditorial", "Home", "FAQ", "Légal", "Compte/Tunnel", "Autre"]
+ROLES = ["Cible + Source", "Cible", "Source", "Exclue"]
+# Rôle par défaut : on cible Produit/Listing, on exclut FAQ/Légal/Compte, l'éditorial et la home émettent.
+ROLE_DEFAUT = {
+    "Produit": "Cible + Source", "Listing/Catégorie": "Cible + Source", "Autre": "Cible + Source",
+    "Éditorial": "Source", "Home": "Source",
+    "FAQ": "Exclue", "Légal": "Exclue", "Compte/Tunnel": "Exclue",
+}
+
+
+def _guess_typologie(cluster, examples):
+    s = (str(cluster) + " " + str(examples)).lower()
+    def has(words):
+        return any(w in s for w in words)
+    if str(cluster).strip().lower() in ("(home)", "home", ""):
+        return "Home"
+    if has(["faq", "/aide", "support", "question", "help"]):
+        return "FAQ"
+    if has(["mention", "cgv", "cgu", "politique", "confidential", "cookie", "/legal", "accessibilit",
+            "retractation", "sanitaire", "plan-du-site", "sitemap", "rgpd"]):
+        return "Légal"
+    if has(["compte", "login", "connexion", "panier", "cart", "checkout", "commande", "reorder",
+            "wishlist", "favoris", "mon-compte", "inscription"]):
+        return "Compte/Tunnel"
+    if has(["blog", "actualite", "conseil", "guide", "univers", "coffee-shop", "article", "recette",
+            "magazine", "inspiration", "/news", "dossier", "lexique"]):
+        return "Éditorial"
+    # Produit vs Listing selon la profondeur des exemples d'URL
+    seg = 0
+    for u in str(examples).split(" | "):
+        path = u.split("://")[-1]
+        path = path.split("/", 1)[1] if "/" in path else ""
+        seg = max(seg, len([x for x in path.strip("/").split("/") if x]))
+    if seg >= 3:
+        return "Produit"
+    if seg >= 1:
+        return "Listing/Catégorie"
+    return "Autre"
+
+
 def propose_clusters(pages: pd.DataFrame) -> pd.DataFrame:
     """Segmente par 1er segment de path discriminant (saute les préfixes de langue).
-    Retourne un mapping éditable : colonnes [pattern, cluster, nb_pages, exemples]."""
+    Retourne un mapping éditable : colonnes [pattern, cluster, typologie, role, nb_pages, exemples]."""
     seg = _make_segmenter(pages["url"].tolist())
     tmp = pages.copy()
     tmp["pattern"] = tmp["url"].map(seg)
@@ -155,16 +199,28 @@ def propose_clusters(pages: pd.DataFrame) -> pd.DataFrame:
               .reset_index()
               .sort_values("nb_pages", ascending=False))
     agg["cluster"] = agg["pattern"].str.strip("/").replace("", "home")
-    return agg[["pattern", "cluster", "nb_pages", "exemples"]]
+    agg["typologie"] = agg.apply(lambda r: _guess_typologie(r["cluster"], r["exemples"]), axis=1)
+    agg["role"] = agg["typologie"].map(ROLE_DEFAUT).fillna("Cible + Source")
+    return agg[["pattern", "cluster", "typologie", "role", "nb_pages", "exemples"]]
 
 
 def apply_clusters(pages: pd.DataFrame, mapping: pd.DataFrame) -> pd.DataFrame:
-    """Applique le mapping pattern->cluster validé aux pages."""
+    """Applique le mapping pattern->cluster/typologie/role validé aux pages."""
     seg = _make_segmenter(pages["url"].tolist())
     pat2cluster = dict(zip(mapping["pattern"], mapping["cluster"]))
     pages = pages.copy()
     pages["_pattern"] = pages["url"].map(seg)
     pages["cluster"] = pages["_pattern"].map(pat2cluster).fillna("autre")
+    if "typologie" in mapping.columns:
+        pat2typo = dict(zip(mapping["pattern"], mapping["typologie"]))
+        pages["typologie"] = pages["_pattern"].map(pat2typo).fillna("Autre")
+    else:
+        pages["typologie"] = "Autre"
+    if "role" in mapping.columns:
+        pat2role = dict(zip(mapping["pattern"], mapping["role"]))
+        pages["role"] = pages["_pattern"].map(pat2role).fillna("Cible + Source")
+    else:
+        pages["role"] = pages["typologie"].map(ROLE_DEFAUT).fillna("Cible + Source")
     return pages.drop(columns=["_pattern"])
 
 
@@ -572,7 +628,14 @@ def build_prescriptions(p, links, cfg, near_clusters=None):
     content = links[links["position"] == "Content"]
     existing = set(zip(content["source"], content["target"]))
 
-    targets = p[p["quadrant_code"] == "Q1"].copy()
+    # Rôles (jalon C) : on ne prescrit QUE vers les pages "Cible", depuis les pages "Source".
+    role = (p["role"].astype(str) if "role" in p.columns
+            else pd.Series("Cible + Source", index=p.index))
+    is_target_role = role.str.contains("Cible")
+    is_source_role = role.str.contains("Source")
+
+    targets = p[(p["quadrant_code"] == "Q1") & is_target_role.values].copy()
+    sources_pool = p[is_source_role.values]
     # index title/h1 des sources pour l'heuristique "contient le mot-clé"
     text_by_url = {r["url"]: f"{r.get('title','')} {r.get('h1','')}".lower()
                    for _, r in p.iterrows()}
@@ -585,11 +648,11 @@ def build_prescriptions(p, links, cfg, near_clusters=None):
         kw_variants = _anchor_variants(t)
         kw_tokens = _kw_tokens(t)
 
-        # candidats sources
-        cand = p[
-            (p["cluster"].isin(allowed_clusters)) &
-            (p["url"] != tgt) &
-            (p["pr_interne"] > median_pr)
+        # candidats sources (uniquement les pages dont le rôle autorise l'émission de liens)
+        cand = sources_pool[
+            (sources_pool["cluster"].isin(allowed_clusters)) &
+            (sources_pool["url"] != tgt) &
+            (sources_pool["pr_interne"] > median_pr)
         ].copy()
 
         scored = []
