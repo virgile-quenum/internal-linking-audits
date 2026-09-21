@@ -238,7 +238,14 @@ def prepare_links(links: pd.DataFrame, pages: pd.DataFrame, cfg, report: dict):
     report["liens_bruts"] = n0
     report["liens_self_ou_vides"] = n0 - len(links)
 
-    # follow / nofollow
+    valid_set = set(pages["url"].tolist())
+
+    # Reachability (pour l'orphelinat) : nb de liens internes vers chaque page connue EN INCLUANT
+    # le nofollow. Une page reliée seulement en nofollow n'est PAS orpheline au sens navigation
+    # (Screaming Frog la voit reliée). Le nofollow reste exclu de l'équité et du maillage contextuel.
+    report["_in_all_reachable"] = links[links["target"].isin(valid_set)].groupby("target").size().to_dict()
+
+    # follow / nofollow (exclus pour l'équité et le maillage contextuel)
     if "follow" in links.columns:
         follow_norm = links["follow"].astype(str).str.lower()
         is_nofollow = follow_norm.str.contains("nofollow") | (follow_norm == "false") | (follow_norm == "no")
@@ -254,7 +261,6 @@ def prepare_links(links: pd.DataFrame, pages: pd.DataFrame, cfg, report: dict):
         page_index = pages.set_index("url")["indexable"].astype(str).str.lower().to_dict()
     else:
         page_index = {}  # colonne absente de l'export Pages : indexabilité jugée côté links
-    valid_set = set(pages["url"].tolist())
 
     before = len(links)
     links = links[links["target"].isin(valid_set)]
@@ -325,18 +331,29 @@ def reclassify_nav(links: pd.DataFrame, n_pages_total: int, cfg, report: dict):
 def compute_page_metrics(pages, links, cfg):
     p = pages.copy()
 
-    # InRank normalisé sur 10 (OnCrawl est déjà 0-10 mais on sécurise)
-    inr = pd.to_numeric(p["inrank"], errors="coerce").fillna(0.0)
-    mx = inr.max() if inr.max() > 0 else 1
-    p["pr_interne"] = (inr / mx * 10).round(2)
-
     content = links[links["position"] == "Content"]
 
     # liens contextuels entrants / sortants
     in_ctx = content.groupby("target").size()
     out_ctx = content.groupby("source").size()
     in_all = links.groupby("target").size()  # tous positions confondues
-    p["liens_ctx_entrants"] = p["url"].map(in_ctx).fillna(0).astype(int)
+    p["liens_ctx_entrants_tmp"] = p["url"].map(in_ctx).fillna(0).astype(int)
+
+    # PageRank interne : on prend celui du crawl (PageRank OnCrawl ou Link Score Screaming Frog).
+    # On ne le RECALCULE PAS. S'il est absent, on retombe sur un proxy « popularité par liens
+    # entrants » (à défaut), et on le signale : l'idéal est d'exporter la colonne PageRank/Link Score.
+    inr = pd.to_numeric(p["inrank"], errors="coerce") if "inrank" in p.columns else None
+    if inr is not None and inr.notna().sum() > 0 and inr.dropna().nunique() > 1:
+        inr = inr.fillna(0.0)
+        mx = inr.max() if inr.max() > 0 else 1
+        p["pr_interne"] = (inr / mx * 10).round(2)
+        p["_pr_source"] = "PageRank / Link Score (crawl)"
+    else:
+        _pop = p["url"].map(in_all).fillna(0)
+        p["pr_interne"] = (_pct_rank(_pop) * 10).round(2)
+        p["_pr_source"] = "proxy liens entrants (colonne PageRank/Link Score absente du crawl)"
+
+    p["liens_ctx_entrants"] = p.pop("liens_ctx_entrants_tmp")
     p["liens_ctx_sortants"] = p["url"].map(out_ctx).fillna(0).astype(int)
     p["liens_entrants_total"] = p["url"].map(in_all).fillna(0).astype(int)
     p["orpheline"] = p["liens_entrants_total"] == 0
@@ -594,6 +611,19 @@ def compute_flags(p, links, cfg):
                 f"positionnée sur {int(r.get('nb_kw', 0))} mots-clés, mais 1 ancre = "
                 f"{r['part_ancre_dominante']:.0%} des liens entrants")
 
+    # même ancre pointant vers plusieurs pages différentes (ambiguïté d'ancre)
+    _c = links[links["position"] == "Content"].copy()
+    _c["anchor"] = _c["anchor"].fillna("").astype(str).str.strip()
+    _c = _c[(_c["anchor"] != "") & (~_c["anchor"].str.lower().isin(GENERIC_ANCHORS))]
+    if len(_c):
+        amb = _c.groupby("anchor").agg(n_cibles=("target", "nunique"), n_liens=("target", "size"))
+        amb = amb[(amb["n_cibles"] >= 2) & (amb["n_liens"] >= 3)]
+        for anc, row in amb.iterrows():
+            cibles = _c[_c["anchor"] == anc]["target"].value_counts().index.tolist()
+            for u in cibles[:12]:
+                add(u, "Ancre ambiguë (même ancre, plusieurs pages)", "Moyenne",
+                    f"l'ancre « {anc} » pointe vers {int(row['n_cibles'])} pages différentes")
+
     # cluster isolé (depuis silo)
     _, _, silo_flags, _ = compute_siloing(p, links, cfg)
     for _, r in silo_flags.iterrows():
@@ -753,6 +783,45 @@ def infer_near_clusters(matrix_pct, threshold=0.10):
 # --------------------------------------------------------------------------
 # Orchestration
 # --------------------------------------------------------------------------
+def _pages_hors_crawl(p, gsc, sem, cfg):
+    """Pages présentes dans la GSC ou la sémantique mais absentes du crawl (même domaine).
+    Orphelines de fait : le crawler ne les a jamais atteintes, donc aucun lien interne n'y mène."""
+    crawl_urls = set(p["url"])
+    hosts = p["url"].map(lambda u: urlsplit(u).netloc)
+    ref_host = hosts.mode().iat[0] if len(hosts) else ""
+    rows = {}
+
+    def _touch(u):
+        return rows.setdefault(u, {"URL": u, "Clics GSC": 0, "Volume sém.": 0, "_src": set()})
+
+    if gsc is not None and len(gsc) and "url" in gsc.columns:
+        g = gsc.copy()
+        g["_u"] = g["url"].map(lambda u: normalize_url(u, cfg))
+        g["_c"] = pd.to_numeric(g["clicks"], errors="coerce").fillna(0) if "clicks" in g.columns else 0
+        g = g.dropna(subset=["_u"])
+        for u, sub in g.groupby("_u"):
+            if u in crawl_urls or (ref_host and urlsplit(u).netloc != ref_host):
+                continue
+            e = _touch(u); e["Clics GSC"] = int(sub["_c"].sum()); e["_src"].add("GSC")
+
+    if sem is not None and len(sem) and "target_url" in sem.columns:
+        s = sem.copy()
+        s["_u"] = s["target_url"].map(lambda u: normalize_url(u, cfg))
+        s["_v"] = pd.to_numeric(s["volume"], errors="coerce").fillna(0) if "volume" in s.columns else 0
+        s = s.dropna(subset=["_u"])
+        for u, sub in s.groupby("_u"):
+            if u in crawl_urls or (ref_host and urlsplit(u).netloc != ref_host):
+                continue
+            e = _touch(u); e["Volume sém."] = int(sub["_v"].sum()); e["_src"].add("Sémantique")
+
+    out = [{"URL": e["URL"], "Clics GSC": e["Clics GSC"], "Volume sém.": e["Volume sém."],
+            "Vue par": " + ".join(sorted(e["_src"]))} for e in rows.values()]
+    df = pd.DataFrame(out, columns=["URL", "Clics GSC", "Volume sém.", "Vue par"])
+    if len(df):
+        df = df.sort_values(["Clics GSC", "Volume sém."], ascending=False).reset_index(drop=True)
+    return df
+
+
 def run_pipeline(pages, links, gsc=None, ga4=None, sem=None,
                  cluster_mapping=None, cfg=None):
     cfg = {**DEFAULT_CONFIG, **(cfg or {})}
@@ -789,6 +858,8 @@ def run_pipeline(pages, links, gsc=None, ga4=None, sem=None,
     pages["url"] = pages["url"].map(lambda u: normalize_url(u, cfg))
     pages = pages.dropna(subset=["url"])
     pages["status_code"] = pd.to_numeric(pages.get("status_code", 200), errors="coerce").fillna(200)
+    if "depth" not in pages.columns:  # profondeur optionnelle
+        pages["depth"] = np.nan
     # Dédup par URL normalisée en gardant le MEILLEUR statut (200 prioritaire sur 301/302/4xx).
     # Sinon /machines/ (301) et /machines (200), qui fusionnent après normalisation, peuvent
     # laisser la variante 301 gagner -> les liens vers ces pages sont exclus à tort et les
@@ -807,6 +878,12 @@ def run_pipeline(pages, links, gsc=None, ga4=None, sem=None,
 
     # Phase 2 - metriques par page
     p = compute_page_metrics(pages, links, cfg)
+    # Orphelinat basé sur TOUS les hyperliens internes (nofollow inclus), comme Screaming Frog :
+    # une page reliée seulement en nofollow n'est pas orpheline.
+    _reach = report.get("_in_all_reachable") or {}
+    if _reach:
+        p["liens_entrants_total"] = p["url"].map(_reach).fillna(0).astype(int)
+        p["orpheline"] = p["liens_entrants_total"] == 0
     p = join_business_data(p, gsc, ga4, sem, cfg)
 
     # Phase 4 - matrice 2 axes
@@ -825,6 +902,12 @@ def run_pipeline(pages, links, gsc=None, ga4=None, sem=None,
     report["quadrants"] = p["quadrant_code"].value_counts().to_dict()
     report["pages_orphelines"] = int(p["orpheline"].sum())
     report["prescriptions_generees"] = len(prescriptions)
+
+    # Orphelines "hors crawl" : pages vues par la GSC ou la sémantique mais absentes du crawl.
+    # Le crawler ne les a jamais atteintes -> aucun lien interne n'y mène -> orphelines de fait.
+    hors = _pages_hors_crawl(p, gsc, sem, cfg)
+    report["_pages_hors_crawl"] = hors if len(hors) else None
+    report["pages_hors_crawl"] = int(len(hors))
 
     return {
         "pages": p,

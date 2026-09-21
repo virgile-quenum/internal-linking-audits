@@ -76,7 +76,7 @@ ALIASES = {
     },
 }
 REQUIRED = {
-    "pages": ["url", "inrank", "depth", "status_code"],
+    "pages": ["url", "status_code"],  # inrank optionnel (PageRank interne calculé si absent), depth optionnel
     "links": ["source", "target", "position"],
     "gsc": ["url", "clicks", "impressions"],
     "ga4": ["url", "sessions", "conversions"],
@@ -341,6 +341,14 @@ for kind, df in previews.items():
 if not mapping_ok:
     st.error("Complète le mapping des colonnes requises avant de continuer.")
     st.stop()
+
+# Alertes qualité : colonnes optionnelles mais importantes
+if not ss.mapped.get("pages", {}).get("inrank"):
+    st.info("ℹ️ Pas de colonne PageRank / Link Score détectée : un proxy « liens entrants » sera utilisé. "
+            "Pour un vrai PageRank interne, exporte la colonne PageRank (OnCrawl) ou Link Score (Screaming Frog).")
+if not ss.mapped.get("links", {}).get("position"):
+    st.warning("⚠️ Pas de colonne « Position du lien » détectée : l'emplacement (menu / contenu / pied) sera imprécis, "
+               "et la répartition du maillage peu fiable. Active « Position du lien » dans ton export de crawl.")
 
 # --------------------------------------------------------------------------
 # ÉTAPE 3 — Segmentation en clusters (sur échantillon de pages, éditable)

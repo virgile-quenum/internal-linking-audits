@@ -352,7 +352,19 @@ def _sheet_plan_action(wb, results, p):
         r3 = end + 2
         ws.cell(row=r3, column=1,
                 value="③ Navigation à corriger — liens menu/pied vers une redirection (à recibler)").font = SUB_FONT
-        _write_df(ws, nv.reset_index(drop=True), start_row=r3 + 1)
+        end = _write_df(ws, nv.reset_index(drop=True), start_row=r3 + 1)
+
+    # Pages orphelines "hors crawl" : vues par GSC/sémantique mais jamais atteintes par le crawl
+    hc = (results.get("report") or {}).get("_pages_hors_crawl")
+    if hc is not None and len(hc):
+        r4 = end + 2
+        ws.cell(row=r4, column=1,
+                value="Pages hors crawl — trafic/volume mais aucun lien interne trouvé (orphelines de fait)").font = SUB_FONT
+        _cn = ws.cell(row=r4 + 1, column=1,
+                      value="Ces pages existent (clics GSC ou volume sémantique) mais le crawler ne les a jamais "
+                            "atteintes : aucune page du site ne pointe vers elles. À reconnecter par un lien interne.")
+        _cn.font = Font(italic=True, color=BLUE)
+        _write_df(ws, hc.head(80).reset_index(drop=True), start_row=r4 + 2)
 
 
 # 2. Synthèse écrite -------------------------------------------------------

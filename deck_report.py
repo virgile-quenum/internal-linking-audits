@@ -106,7 +106,9 @@ def _metrics(results):
     if links is not None and "position" in links.columns:
         pos = links["position"].value_counts()
         tot = max(int(pos.sum()), 1)
-        m["boiler_pct"] = (pos.get("Footer", 0) + pos.get("Header", 0)) / tot * 100
+        # Boilerplate = blocs répétés : menu/navigation + header + footer + sidebar (tout sauf le contenu).
+        m["boiler_pct"] = (pos.get("Footer", 0) + pos.get("Header", 0)
+                           + pos.get("Navigation", 0) + pos.get("Sidebar", 0)) / tot * 100
         m["content_pct"] = pos.get("Content", 0) / tot * 100
     else:
         m["boiler_pct"] = m["content_pct"] = None
