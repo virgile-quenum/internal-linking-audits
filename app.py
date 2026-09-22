@@ -377,9 +377,16 @@ exclure = c2.multiselect("🚫 Types à exclure (hors scope)", _opts,
 st.caption("Tout type non listé devient « Source » (émet des liens mais n'est pas ciblé). "
            "« Cibler » implique aussi « peut être source ».")
 
+if not cibler:
+    st.warning("⚠️ Aucun « type à cibler » sélectionné : sans cible, l'outil ne peut prescrire aucun lien. "
+               "Par sécurité, tous les types non exclus sont donc traités comme cibles. "
+               "Sélectionne des types à cibler pour prioriser le maillage.")
+
 def _role_of(t):
     if t in exclure:
         return "Exclue"
+    if not cibler:            # garde-fou : pas de cible explicite -> tout non-exclu devient cible
+        return "Cible + Source"
     if t in cibler:
         return "Cible + Source"
     return "Source"

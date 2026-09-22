@@ -663,6 +663,13 @@ def build_prescriptions(p, links, cfg, near_clusters=None):
             else pd.Series("Cible + Source", index=p.index))
     is_target_role = role.str.contains("Cible")
     is_source_role = role.str.contains("Source")
+    # Garde-fou : si aucune page n'a de rôle "Cible" (ex. champ "types à cibler" laissé vide dans
+    # l'app -> tout devient "Source"), on ne doit PAS renvoyer 0 prescription en silence. On retombe
+    # alors sur "toute page non exclue est une cible / une source".
+    if not bool(is_target_role.any()):
+        is_target_role = ~role.str.contains("Exclue")
+    if not bool(is_source_role.any()):
+        is_source_role = ~role.str.contains("Exclue")
 
     targets = p[(p["quadrant_code"] == "Q1") & is_target_role.values].copy()
     sources_pool = p[is_source_role.values]
