@@ -42,6 +42,10 @@ ALIASES = {
         "title": ["title", "title 1", "titre", "page title", "meta title"],
         "h1": ["h1", "h1 1", "h1 tag", "premier h1"],
         "content_type": ["content type", "type de contenu", "contenttype", "mime type"],
+        # Optionnels (Screaming Frog) : permettent de dire PAR QUOI remplacer un lien de menu/footer.
+        "redirect_url": ["url de redirection", "redirect url", "redirect uri", "url redirection"],
+        "canonical_url": ["element de lien en version canonique 1", "canonical link element 1",
+                          "url canonique", "canonical url"],
     },
     "links": {
         # OnCrawl : origin/target/anchor/follow/origin_position/intern.
@@ -69,7 +73,7 @@ ALIASES = {
         "value": ["value", "valeur", "revenue", "revenu", "total revenue", "event value"],
     },
     "sem": {
-        "keyword": ["keyword", "mot cle", "query", "requete", "mot-cle", "terme"],
+        "keyword": ["keyword", "keywords", "mot cle", "mots cles", "mot-cle", "mots-cles", "query", "requete", "terme", "expression"],
         "volume": ["volume", "search volume", "volume de recherche", "sv", "recherches"],
         "target_url": ["url cible", "target url", "url", "landing", "page cible"],
         "cluster": ["cluster", "groupe", "thematique", "categorie", "segment"],
@@ -231,6 +235,8 @@ with st.sidebar:
     cfg["poor_anchor_threshold"] = st.slider("Ancre pauvre (génériques/vides)", 0.3, 0.9, 0.50, 0.05)
     cfg["quadrant_x_split"] = st.slider("Seuil axe X (potentiel)", 3.0, 7.0, 5.0, 0.5)
     cfg["quadrant_y_split"] = st.slider("Seuil axe Y (déficit)", 3.0, 7.0, 5.0, 0.5)
+    cfg["max_liens_par_source"] = st.slider("Max nouveaux liens par page source", 1, 15, 5, 1,
+                                            help="Évite de surcharger une même page de nouveaux liens (dilution).")
     cfg["strip_query_params"] = st.checkbox("Retirer les paramètres d'URL", value=True)
     st.divider()
     site_name = st.text_input("Nom du client (titre du livrable)", "Client")

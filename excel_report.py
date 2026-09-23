@@ -94,10 +94,16 @@ def _write_df(ws, df, start_row=1, start_col=1, autofilter=True, header=True, ba
             if band and idx % 2 == 1:
                 cell.fill = PatternFill("solid", fgColor=GREY)
         r += 1
-    if autofilter and header:
+    # Autofilter et gel des volets : UNIQUEMENT pour un tableau ancré en haut de feuille
+    # (start_row <= 6) et une seule fois par feuille. Sinon, sur les onglets multi-tableaux
+    # (Plan d'action, Tableau de bord, Silotage), le freeze se posait au milieu de la feuille
+    # (ligne 115...) et bloquait tout le scroll.
+    top_anchored = start_row <= 6
+    if autofilter and header and top_anchored and ws.auto_filter.ref is None:
         last = get_column_letter(start_col + len(df.columns) - 1)
         ws.auto_filter.ref = f"{get_column_letter(start_col)}{start_row}:{last}{r-1}"
-    ws.freeze_panes = ws.cell(row=start_row + 1, column=start_col)
+    if header and top_anchored and ws.freeze_panes is None:
+        ws.freeze_panes = ws.cell(row=start_row + 1, column=start_col)
     _autosize(ws, df, start_col)
     return r
 
@@ -109,7 +115,9 @@ def build_excel(results: dict, output_path: str, site_name: str = "Client"):
     _lk = results.get("links")
     if _lk is not None and "anchor" in getattr(_lk, "columns", []):
         _c = _lk[_lk["position"] == "Content"].copy()
-        _c["anchor"] = _c["anchor"].fillna("").astype(str).str.strip().replace("", "(vide)")
+        # Ancre vide = lien porté par une image ou un bouton (pas de texte cliquable). On le dit
+        # explicitement plutôt que d'afficher "(vide)", qui laissait penser à un bug (retour consultant).
+        _c["anchor"] = _c["anchor"].fillna("").astype(str).str.strip().replace("", "(image/bouton)")
         _amap = {t: " ; ".join(f"{a} ({n})" for a, n in _c_g["anchor"].value_counts().head(4).items())
                  for t, _c_g in _c.groupby("target")}
     else:
@@ -125,19 +133,39 @@ def build_excel(results: dict, output_path: str, site_name: str = "Client"):
         except Exception as e:
             notes.append(f"{fn.__name__}: {e}")
 
-    _safe(_sheet_legende, wb, cfg, results, p)
-    _safe(_sheet_plan_action, wb, results, p)
-    _safe(_sheet_synthese_ecrite, wb, results, p, site_name, notes)
-    _safe(_sheet_dashboard, wb, results, p, site_name)
-    _safe(_sheet_problemes, wb, results, p)
-    _safe(_sheet_prescriptions, wb, results)
-    _safe(_sheet_analyse_page, wb, p)
-    _safe(_sheet_ancres, wb, p)
-    _safe(_sheet_silotage, wb, results)
+    # Onglets (méthodologie à la fin). L'onglet Mots-clés n'apparaît que si l'étude sémantique
+    # est fournie : c'est la seule source fiable pour relier un terme à une URL.
+    _safe(_sheet_synthese_ecrite, wb, results, p, site_name, notes)   # 1
+    _safe(_sheet_plan_action, wb, results, p)                          # 2
+    _safe(_sheet_nav_fix, wb, results)                                 # 3 menu & footer
+    _safe(_sheet_prescriptions, wb, results)                           # 4
+    _safe(_sheet_motscles, wb, results)                                # 5 (si sémantique)
+    _safe(_sheet_detail, wb, results, p)                               # 6
+    _safe(_sheet_legende, wb, cfg, results, p)                         # 7
 
-    order = ["1. Méthodologie & Légende", "Plan d'action", "2. Synthèse écrite", "3. Tableau de bord",
-             "4. Problèmes identifiés", "5. Prescription liens", "6. Analyse par page",
-             "7. Analyse ancres", "8. Silotage clusters"]
+    # Texte d'intro en A2 (onglets tableaux) : fusionné sur la largeur du tableau, aligné EN HAUT,
+    # ligne assez haute pour être lu d'un bloc (retour : texte trop bas / cellule trop étroite).
+    for _ws in wb.worksheets:
+        if not _ws.title[:1].isdigit():
+            continue  # ne pas toucher la feuille par défaut (sinon elle n'est plus vue comme vide)
+        try:
+            _v = _ws["A2"].value
+            if not _v or _ws.title.startswith(("1.", "7.")):
+                continue
+            _last = max(8, min(_ws.max_column, 12))
+            _ws.merge_cells(start_row=2, start_column=1, end_row=2, end_column=_last)
+            _ws["A2"].alignment = Alignment(wrap_text=True, vertical="top", horizontal="left")
+            _ws.row_dimensions[2].height = max(34, min(90, 15 * (len(str(_v)) // 140 + 1) + 6))
+        except Exception as _e:
+            notes.append(f"intro A2 {_ws.title}: {_e}")
+
+    # Retirer la feuille "Sheet" vide créée par défaut par openpyxl (plus repeuplée).
+    for _dft in ("Sheet", "Feuille", "Feuil1"):
+        if _dft in wb.sheetnames and wb[_dft].max_row <= 1 and wb[_dft].max_column <= 1:
+            del wb[_dft]
+
+    order = ["1. Synthèse", "2. Plan d'action", "3. Liens à corriger", "4. Prescription liens",
+             "5. Mots-clés", "6. Détail par page", "7. Méthodologie"]
     try:
         wb._sheets.sort(key=lambda s: order.index(s.title) if s.title in order else 99)
     except Exception:
@@ -161,8 +189,7 @@ def build_excel(results: dict, output_path: str, site_name: str = "Client"):
 
 # 1. Méthodologie & Légende ------------------------------------------------
 def _sheet_legende(wb, cfg, results, p):
-    ws = wb.active
-    ws.title = "1. Méthodologie & Légende"
+    ws = wb.create_sheet("7. Méthodologie")
     ws.sheet_view.showGridLines = False
     ws.column_dimensions["A"].width = 3
     ws.column_dimensions["B"].width = 34
@@ -183,19 +210,20 @@ def _sheet_legende(wb, cfg, results, p):
 
     title("Comment lire ce fichier")
     h2("Les onglets, dans l'ordre")
-    line("2. Synthèse écrite", "L'analyse rédigée : ce qui est sous-maillé, sur-maillé, et les actions prioritaires.")
-    line("3. Tableau de bord", "La matrice de diagnostic en graphique + les chiffres clés + top pages.")
-    line("4. Problèmes identifiés", "Chaque type de problème avec son volume, son % de pages et un exemple.")
-    line("5. Prescription liens", "Le livrable actionnable : quels liens créer, avec quelle ancre et où.")
-    line("6. Analyse par page", "Le détail page par page, toutes les métriques (pour aller au fond).")
-    line("7. Analyse ancres", "La qualité des ancres, en pourcentages.")
-    line("8. Silotage clusters", "Comment les catégories se lient entre elles.")
+    line("1. Synthèse", "L'analyse rédigée + les chiffres clés + la matrice de diagnostic. À lire en premier.")
+    line("2. Plan d'action", "Le livrable actionnable : quoi faire, par page, du plus important au moins important.")
+    line("3. Liens à corriger", "Les liens existants à modifier ou supprimer (menu/footer, puis dans le contenu page par page), avec l'URL à mettre à la place.")
+    line("4. Prescription liens", "Les liens à créer : source, cible, ancre, emplacement, priorité.")
+    line("5. Mots-clés", "Un terme par ligne, trié par opportunité : sur quels mots-clés remonter (si étude sémantique fournie).")
+    line("6. Détail par page", "Le détail page par page (métriques, ancres, problèmes, silotage) pour aller au fond.")
+    line("7. Méthodologie", "Ce document : comment lire, définitions, seuils.")
     gap()
 
     h2("Le diagnostic repose sur 2 axes (pas un score unique)")
-    line("Axe X — Potentiel business (0 à 10)", "Mesure la valeur business d'une page. Combine : volume de recherche "
-         "des mots-clés visés + clics GSC + impressions GSC + conversions GA4. Chaque ingrédient est classé en "
-         "rang (percentile) puis moyenné et ramené sur 10. 10 = page à très fort enjeu, 0 = enjeu faible.")
+    line("Axe X — Opportunité (0 à 10)", "Mesure l'upside réel d'une page. Croise la DEMANDE (volume de "
+         "recherche + impressions GSC) avec le GAP DE POSITION : une page déjà en top 3 pèse peu (déjà gagnée), "
+         "le maximum est en position 4-10 (bas de page 1 / haut de page 2). Quand la sémantique est fournie, "
+         "le calcul est fait mot-clé par mot-clé. 10 = fort upside, 0 = peu à aller chercher.")
     line("Axe Y — Déficit de maillage (0 à 10)", "Mesure à quel point une page est mal maillée. Combine (à l'inverse) : "
          "PageRank interne (InRank) + nombre de liens contextuels entrants + qualité des ancres + profondeur de clic. "
          "10 = fortement sous-maillée, 0 = très bien maillée.")
@@ -234,7 +262,7 @@ def _sheet_legende(wb, cfg, results, p):
 # Plan d'action (vue principale, actionnable) --------------------------------
 def _sheet_plan_action(wb, results, p):
     import numpy as _np
-    ws = wb.create_sheet("Plan d'action")
+    ws = wb.create_sheet("2. Plan d'action")
     ws["A1"] = "Plan d'action — quoi faire, par page, du plus important au moins important"
     ws["A1"].font = TITLE_FONT
     ws["A2"] = ("3 natures d'action : AJOUTER des liens (page peu/pas maillée) · OPTIMISER les ancres "
@@ -339,20 +367,18 @@ def _sheet_plan_action(wb, results, p):
         ws.cell(row=r2, column=1, value="Vos pages les mieux maillées (référence)").font = SUB_FONT
         end = _write_df(ws, strong.reset_index(drop=True), start_row=r2 + 1)
 
-    # ③ Navigation à corriger : liens menu/pied qui pointent vers une redirection
-    nav = (results.get("report") or {}).get("_nav_a_corriger")
-    if nav is not None and len(nav):
-        nv = nav.copy()
-        nv["Action"] = "Changer ce lien de navigation : le faire pointer vers l'URL finale (200)"
-        nv = nv.rename(columns={"target": "URL cible (redirige)", "emplacement": "Emplacement",
-                                "nb_liens": "Nb liens (≈ nb pages)", "statut_cible": "Statut cible"})
-        keep = [c for c in ["URL cible (redirige)", "Emplacement", "Nb liens (≈ nb pages)",
-                            "Statut cible", "Action"] if c in nv.columns]
-        nv = nv[keep].head(60)
+    # ③ Liens à corriger : désormais dans leur propre onglet « 3. Liens à corriger » (plus lisible).
+    _rp = results.get("report") or {}
+    _nv = _rp.get("_nav_a_corriger")
+    _nn = len(_nv) if _nv is not None else 0
+    _nc = _rp.get("liens_contenu_a_corriger", 0)
+    if _nn or _nc:
         r3 = end + 2
         ws.cell(row=r3, column=1,
-                value="③ Navigation à corriger — liens menu/pied vers une redirection (à recibler)").font = SUB_FONT
-        end = _write_df(ws, nv.reset_index(drop=True), start_row=r3 + 1)
+                value=f"③ Liens à corriger : {_nn} dans le menu/footer, {_nc} dans le contenu "
+                      f"(dont {_rp.get('liens_contenu_a_supprimer', 0)} à supprimer), "
+                      f"voir l'onglet « 3. Liens à corriger ».").font = SUB_FONT
+        end = r3 + 1
 
     # Pages orphelines "hors crawl" : vues par GSC/sémantique mais jamais atteintes par le crawl
     hc = (results.get("report") or {}).get("_pages_hors_crawl")
@@ -369,10 +395,12 @@ def _sheet_plan_action(wb, results, p):
 
 # 2. Synthèse écrite -------------------------------------------------------
 def _sheet_synthese_ecrite(wb, results, p, site_name, notes=None):
-    ws = wb.create_sheet("2. Synthèse écrite")
+    ws = wb.create_sheet("1. Synthèse")
     ws.sheet_view.showGridLines = False
     ws.column_dimensions["A"].width = 3
-    ws.column_dimensions["B"].width = 118
+    ws.column_dimensions["B"].width = 92
+    ws.column_dimensions["C"].width = 30
+    ws.column_dimensions["D"].width = 30
 
     rows = [("title", f"Synthèse de l'audit de maillage interne — {site_name}")]
     try:
@@ -398,12 +426,17 @@ def _sheet_synthese_ecrite(wb, results, p, site_name, notes=None):
     try:
         q3 = p[p["quadrant_code"] == "Q3"]
         if len(q3):
+            _inl_col = "liens_entrants_total" if "liens_entrants_total" in q3.columns else "liens_ctx_entrants"
             g = q3.groupby("cluster").agg(n=("url", "size"), pr=("pr_interne", "mean"),
-                                          inl=("liens_ctx_entrants", "mean")).sort_values("pr", ascending=False).head(4)
-            rows.append(("h2", "Sur-maillage : pages sur-abreuvées en PageRank pour un faible potentiel"))
-            rows.append(("body", "Elles concentrent du PageRank et des liens pour peu de valeur. Réallouer ce maillage vers les pages Q1."))
-            for c, x in g.iterrows():
-                rows.append(("bullet", f"« {c} » : {int(x['n'])} pages, PageRank {x['pr']:.1f}/10, {x['inl']:.0f} liens entrants en moyenne."))
+                                          inl=(_inl_col, "mean"))
+            # On surface les clusters réellement sur-maillés : beaucoup de liens entrants (nav incluse)
+            # pour peu de valeur. On ignore les segments à 1 page et quasi sans liens (bruit type légal isolé).
+            g = g[g["inl"] >= 2].sort_values("inl", ascending=False).head(4)
+            if len(g):
+                rows.append(("h2", "Sur-maillage : pages très liées en interne pour un faible potentiel"))
+                rows.append(("body", "Elles reçoivent beaucoup de liens internes (souvent via le menu ou le pied de page) pour peu de valeur business. Réallouer ce maillage vers les pages Q1."))
+                for c, x in g.iterrows():
+                    rows.append(("bullet", f"« {c} » : {int(x['n'])} page(s), {x['inl']:.0f} liens internes entrants en moyenne (PageRank {x['pr']:.1f}/10)."))
     except Exception as e:
         notes and notes.append(f"syn_q3:{e}")
     try:
@@ -426,12 +459,21 @@ def _sheet_synthese_ecrite(wb, results, p, site_name, notes=None):
         presc = results.get("prescriptions")
         n_presc = len(presc) if presc is not None else 0
         n_p1 = int((presc["priorite"] == 1).sum()) if (presc is not None and len(presc) and "priorite" in presc.columns) else 0
+        _nav = (results.get("report") or {}).get("_nav_a_corriger")
+        n_nav = len(_nav) if _nav is not None else 0
         rows.append(("h2", "Recommandations, par ordre de priorité"))
-        rows.append(("bullet", f"1. Déployer les {n_presc} liens prescrits (onglet « Prescription liens »), en commençant par les {n_p1} de priorité 1."))
-        rows.append(("bullet", "2. Réallouer le maillage des pages Q3 (sur-maillées) vers les pages Q1."))
-        rows.append(("bullet", "3. Donner au moins un lien contextuel entrant aux pages orphelines."))
-        rows.append(("bullet", "4. Remonter les pages profondes à fort potentiel dans l'arborescence."))
-        rows.append(("bullet", "5. Corriger les ancres pauvres ou trop homogènes sur les pages Q1."))
+        k = 1
+        if n_nav:
+            rows.append(("bullet", f"{k}. Corriger les {n_nav} liens de menu / footer à problème (onglet « Liens à corriger ») : une correction dans le gabarit règle toutes les pages. Effort faible, gain immédiat."))
+            k += 1
+        _rp = results.get("report") or {}
+        if _rp.get("liens_contenu_a_corriger", 0):
+            rows.append(("bullet", f"{k}. Nettoyer les liens de contenu cassés ou redirigés : {_rp.get('liens_contenu_a_supprimer', 0)} à supprimer (404) et {_rp['liens_contenu_a_corriger'] - _rp.get('liens_contenu_a_supprimer', 0)} à mettre à jour, page par page (onglet « Liens à corriger »)."))
+            k += 1
+        rows.append(("bullet", f"{k}. Déployer les {n_presc} liens prescrits (onglet « Prescription liens »), en commençant par les {n_p1} de priorité 1 (produits et catégories d'abord)."))
+        rows.append(("bullet", f"{k+1}. Cibler en priorité les pages à fort upside : forte demande mais position 4 à 20. Les pages déjà en top 3 sont volontairement écartées, elles ont peu à gagner."))
+        rows.append(("bullet", f"{k+2}. Donner au moins un lien contextuel entrant aux pages orphelines."))
+        rows.append(("bullet", f"{k+3}. Corriger les ancres pauvres, trop homogènes ou portées par une image (sans texte) sur les pages Q1."))
     except Exception as e:
         notes and notes.append(f"syn_reco:{e}")
 
@@ -449,12 +491,59 @@ def _sheet_synthese_ecrite(wb, results, p, site_name, notes=None):
             c = ws.cell(row=r, column=2, value=text); c.font = Font(size=11)
             c.alignment = Alignment(wrap_text=True, vertical="top")
         r += 1
-    if notes:
+    # --- Chiffres clés + matrice de diagnostic (ex-onglet Tableau de bord, fondu ici) ---
+    rep = results.get("report", {})
+    quad = p["quadrant_code"].value_counts().to_dict()
+    r += 2
+    ws.cell(row=r, column=2, value="Chiffres clés").font = SUB_FONT
+    r += 1
+    kpis = [("Pages analysées", rep.get("pages_total", len(p))),
+            ("Liens internes valides", rep.get("liens_valides", "")),
+            ("Pages orphelines", rep.get("pages_orphelines", int(p["orpheline"].sum()))),
+            ("Q1 — Prioritaires", quad.get("Q1", 0)),
+            ("Q3 — Sur-maillage", quad.get("Q3", 0)),
+            ("Liens menu / footer à corriger", rep.get("urls_nav_a_corriger", 0)),
+            ("Prescriptions générées", rep.get("prescriptions_generees", 0))]
+    for label, val in kpis:
+        a = ws.cell(row=r, column=2, value=label); a.font = Font(bold=True); a.border = BORDER; a.alignment = LEFT
+        b = ws.cell(row=r, column=3, value=_safe_cell(val)); b.alignment = CENTER; b.border = BORDER
+        if label.startswith("Q1"):
+            a.fill = QUAD_FILL["Q1"]; b.fill = QUAD_FILL["Q1"]
         r += 1
+
+    r += 1
+    ws.cell(row=r, column=2, value="Matrice de diagnostic (nombre de pages)").font = SUB_FONT
+    r += 1
+
+    def _mx(row, col, val, fill=None, white=False):
+        c = ws.cell(row=row, column=col, value=val)
+        c.border = BORDER
+        c.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+        if fill is not None:
+            c.fill = fill
+        c.font = Font(bold=True, color="FFFFFF" if white else "191D63")
+        return c
+
+    _mx(r, 2, "")
+    _mx(r, 3, "Faible opportunité", HEADER_FILL, white=True)
+    _mx(r, 4, "Forte opportunité", HEADER_FILL, white=True)
+    r += 1
+    _mx(r, 2, "Fort déficit de maillage", HEADER_FILL, white=True)
+    _mx(r, 3, f"Q4 — Ne rien faire\n{quad.get('Q4', 0)} pages", QUAD_FILL["Q4"])
+    _mx(r, 4, f"Q1 — PRIORITAIRE\n{quad.get('Q1', 0)} pages", QUAD_FILL["Q1"])
+    ws.row_dimensions[r].height = 30
+    r += 1
+    _mx(r, 2, "Bon maillage", HEADER_FILL, white=True)
+    _mx(r, 3, f"Q3 — Sur-maillage\n{quad.get('Q3', 0)} pages", QUAD_FILL["Q3"])
+    _mx(r, 4, f"Q2 — Hors scope\n{quad.get('Q2', 0)} pages", QUAD_FILL["Q2"])
+    ws.row_dimensions[r].height = 30
+
+    if notes:
+        r += 2
         ws.cell(row=r, column=2, value="Notes techniques : " + " | ".join(notes)).font = Font(italic=True, color="999999", size=9)
 
 
-# 3. Tableau de bord -------------------------------------------------------
+# (ex-onglet Tableau de bord : fondu dans la Synthèse) ---------------------
 def _sheet_dashboard(wb, results, p, site_name):
     ws = wb.create_sheet("3. Tableau de bord")
     ws.sheet_view.showGridLines = False
@@ -524,13 +613,11 @@ def _sheet_dashboard(wb, results, p, site_name):
     _write_df(ws, q3.reset_index(drop=True), start_row=r3 + 1, start_col=2, autofilter=False)
 
 
-# 4. Problèmes identifiés --------------------------------------------------
-def _sheet_problemes(wb, results, p):
-    ws = wb.create_sheet("4. Problèmes identifiés")
-    ws["A1"] = "Problèmes identifiés"
-    ws["A1"].font = TITLE_FONT
-    ws["A2"] = "Pour chaque type : sa gravité, son volume, sa part des pages, et un exemple concret."
-    ws["A2"].font = Font(italic=True, color=BLUE)
+# Section Problèmes (fondue dans l'onglet Détail) --------------------------
+def _section_problemes(ws, results, p, start_row):
+    ws.cell(row=start_row, column=1, value="Problèmes identifiés").font = TITLE_FONT
+    ws.cell(row=start_row + 1, column=1,
+            value="Pour chaque type : sa gravité, son volume, sa part des pages, et un exemple concret.").font = Font(italic=True, color=BLUE)
 
     flags = results["flags"].copy()
     n_pages = max(len(p), 1)
@@ -552,11 +639,11 @@ def _sheet_problemes(wb, results, p):
     else:
         recap = pd.DataFrame(columns=["Type de problème", "Gravité", "Volume", "% des pages",
                                       "Exemple (URL)", "Cluster de l'exemple"])
-    ws.cell(row=4, column=1, value="Récapitulatif par type").font = SUB_FONT
-    end = _write_df(ws, recap, start_row=5)
+    ws.cell(row=start_row + 2, column=1, value="Récapitulatif par type").font = SUB_FONT
+    end = _write_df(ws, recap, start_row=start_row + 3, autofilter=False)
     if "Gravité" in recap.columns:
         gcol = list(recap.columns).index("Gravité") + 1
-        for row in ws.iter_rows(min_row=6, max_row=end - 1, min_col=gcol, max_col=gcol):
+        for row in ws.iter_rows(min_row=start_row + 4, max_row=end - 1, min_col=gcol, max_col=gcol):
             for cell in row:
                 if cell.value in GRAVITE_FILL:
                     cell.fill = GRAVITE_FILL[cell.value]
@@ -595,45 +682,132 @@ def _sheet_problemes(wb, results, p):
             for cell in row:
                 if cell.value in GRAVITE_FILL:
                     cell.fill = GRAVITE_FILL[cell.value]
+    return d_end
 
 
-# 5. Prescription liens ----------------------------------------------------
+# 3. Liens à corriger : menu & footer (gabarit) + contenu (page par page) ----
+def _color_actions(ws, first_row, last_row, col=1):
+    for row in ws.iter_rows(min_row=first_row, max_row=last_row, min_col=col, max_col=col):
+        for cell in row:
+            v = str(cell.value or "")
+            if v.startswith("MODIFIER"):
+                cell.fill = PatternFill("solid", fgColor=ORANGE)
+            elif v.startswith(("SUPPRIMER", "RETIRER")):
+                cell.fill = PatternFill("solid", fgColor=RED)
+            elif v.startswith("VÉRIFIER"):
+                cell.fill = PatternFill("solid", fgColor=LIGHT)
+
+
+def _fill_repl(d):
+    if "remplacer_par" in d.columns:
+        d["remplacer_par"] = [
+            r if (isinstance(r, str) and r) else
+            ("URL finale à identifier (absente de l'export)" if str(a).startswith("MODIFIER") else "")
+            for r, a in zip(d["remplacer_par"], d["action"])]
+    return d
+
+
+def _sheet_nav_fix(wb, results):
+    rep = results.get("report") or {}
+    nav = rep.get("_nav_a_corriger")
+    cfix = rep.get("_contenu_a_corriger")
+    ws = wb.create_sheet("3. Liens à corriger")
+    ws["A1"] = "Liens à corriger : à modifier ou supprimer"
+    ws["A1"].font = TITLE_FONT
+    ws["A2"] = ("Liens existants qui pointent vers une page à problème. MODIFIER = remplacer l'URL du lien par "
+                "celle de la colonne « Remplacer par ». SUPPRIMER = lien cassé (404), à enlever ou remplacer. "
+                "VÉRIFIER = cas souvent voulu (compte, panier, redirection temporaire), à trancher. "
+                "Bloc 1 : menu & footer, une correction dans le gabarit règle toutes les pages. "
+                "Bloc 2 : liens dans le contenu, à corriger page par page dans le CMS. "
+                "Les URL bloquées par robots.txt (compte client, avis…) sont volontairement ignorées.")
+    ws["A2"].font = Font(italic=True, color=BLUE)
+    ws["A2"].alignment = Alignment(wrap_text=True, vertical="top")
+
+    # --- Bloc 1 : menu / header / footer ---
+    r = 4
+    n_nav = len(nav) if nav is not None else 0
+    ws.cell(row=r, column=1, value=f"1. Menu, header & footer ({n_nav} lien(s)) — à corriger dans le gabarit").font = SUB_FONT
+    if n_nav:
+        d = _fill_repl(nav.copy())
+        ren = {"action": "Action", "emplacement": "Emplacement", "lien_actuel": "Lien actuel (URL pointée)",
+               "remplacer_par": "Remplacer par", "probleme": "Problème", "nb_pages": "Nb pages concernées",
+               "nb_liens": "Nb liens"}
+        cols = [c for c in ["action", "emplacement", "lien_actuel", "remplacer_par", "probleme",
+                            "nb_pages", "nb_liens"] if c in d.columns]
+        end = _write_df(ws, d[cols].rename(columns=ren).reset_index(drop=True), start_row=r + 1, autofilter=False)
+        _color_actions(ws, r + 2, end - 1)
+    else:
+        ws.cell(row=r + 1, column=1, value="Aucun : tous les liens de navigation pointent vers des pages valides.").font = Font(italic=True)
+        end = r + 2
+
+    # --- Bloc 2 : liens dans le contenu (page à éditer) ---
+    r2 = end + 2
+    n_c = len(cfix) if cfix is not None else 0
+    n_sup = int(cfix["action"].str.startswith("SUPPRIMER").sum()) if n_c else 0
+    ws.cell(row=r2, column=1,
+            value=f"2. Dans le contenu ({n_c} lien(s), dont {n_sup} à supprimer) — à corriger page par page").font = SUB_FONT
+    if n_c:
+        d = _fill_repl(cfix.copy())
+        pg = results.get("pages")
+        if pg is not None and "clics_gsc" in pg.columns:
+            d["clics_page"] = d["page_a_editer"].map(dict(zip(pg["url"], pg["clics_gsc"]))).fillna(0).astype(int)
+        else:
+            d["clics_page"] = 0
+        # 404 d'abord (à supprimer), puis redirections/canoniques ; dans chaque groupe, les pages
+        # à plus fort trafic en premier.
+        d = d.sort_values(["_rang", "clics_page", "page_a_editer"], ascending=[True, False, True])
+        ren = {"action": "Action", "page_a_editer": "Page à éditer", "clics_page": "Clics GSC page",
+               "lien_actuel": "Lien actuel (URL pointée)", "ancre": "Ancre du lien",
+               "remplacer_par": "Remplacer par", "probleme": "Problème", "nb_occurrences": "Occurrences"}
+        cols = [c for c in ["action", "page_a_editer", "clics_page", "lien_actuel", "ancre", "remplacer_par",
+                            "probleme", "nb_occurrences"] if c in d.columns]
+        df = d[cols].rename(columns=ren).reset_index(drop=True)
+        end2 = _write_df(ws, df, start_row=r2 + 1, autofilter=False)
+        # filtre sur ce bloc (le plus long) pour trier / isoler une page ou une action
+        ws.auto_filter.ref = f"A{r2 + 1}:{get_column_letter(len(df.columns))}{end2 - 1}"
+        _color_actions(ws, r2 + 2, end2 - 1)
+    else:
+        ws.cell(row=r2 + 1, column=1, value="Aucun lien de contenu à corriger.").font = Font(italic=True)
+    ws.column_dimensions["A"].width = 46
+
+
+# 4. Prescription liens ----------------------------------------------------
 def _sheet_prescriptions(wb, results):
-    ws = wb.create_sheet("5. Prescription liens")
+    ws = wb.create_sheet("4. Prescription liens")
     ws["A1"] = "Prescription de liens internes — livrable central"
     ws["A1"].font = TITLE_FONT
-    ws["A2"] = ("Une ligne = un lien à créer, de « Page source » vers « Page cible », avec l'ancre indiquée, en contenu. "
-                "Trié pour traiter d'abord les pages cibles à fort trafic / fort volume.")
+    ws["A2"] = ("Une ligne = un lien à créer, de « Page source » vers « Page cible », en contenu. "
+                "Trié par PRIORITÉ (1 = à faire d'abord : produits/catégories à fort upside). "
+                "Les pages déjà en top 3 ne reçoivent pas de prescription (peu à gagner). "
+                "« Ancre à affiner » = ancre dérivée du titre, à retravailler vers un mot-clé.")
     ws["A2"].font = Font(italic=True, color=BLUE)
+    ws["A2"].alignment = Alignment(wrap_text=True)
     presc = results["prescriptions"].copy()
-    # Enrichir avec l'importance business de la page cible (clics / impressions / volume) et trier dessus.
+    # Enrichir avec l'importance business de la page cible (clics / volume) et trier PRIORITÉ puis clics.
     pg = results.get("pages")
     if pg is not None and len(presc) and "page_cible" in presc.columns:
-        imp_cols = [c for c in ["clics_gsc", "impressions_gsc", "position_gsc", "volume_semantique",
-                                "_kw_detail"] if c in pg.columns]
+        imp_cols = [c for c in ["clics_gsc", "volume_semantique", "_kw_detail"] if c in pg.columns]
         if imp_cols:
             imp = pg[["url"] + imp_cols].rename(columns={"url": "page_cible", "clics_gsc": "clics_cible",
-                    "impressions_gsc": "impr_cible", "position_gsc": "pos_cible", "volume_semantique": "vol_cible",
-                    "_kw_detail": "kw_cible"})
-            if "pos_cible" in imp.columns:
-                imp["pos_cible"] = pd.to_numeric(imp["pos_cible"], errors="coerce").round(1)
+                    "volume_semantique": "vol_cible", "_kw_detail": "kw_cible"})
             presc = presc.merge(imp, on="page_cible", how="left")
-            sort_by = [c for c in ["clics_cible", "vol_cible", "impr_cible"] if c in presc.columns]
-            if sort_by:
-                presc = presc.sort_values(sort_by, ascending=False)
-    ren = {"page_source": "Page source", "page_cible": "Page cible", "cluster_cible": "Cluster cible",
-           "ancre_recommandee": "Ancre recommandée", "emplacement_suggere": "Emplacement",
-           "priorite": "Priorité", "pr_source": "PR source", "match_kw": "Match mot-clé",
-           "potentiel_cible": "Potentiel cible", "deficit_cible": "Déficit cible",
-           "clics_cible": "Clics GSC cible", "impr_cible": "Impressions cible",
-           "pos_cible": "Position GSC cible (moy.)", "vol_cible": "Volume sém. cible (somme mots-clés)",
+        sort_by = [c for c in ["priorite", "clics_cible", "vol_cible"] if c in presc.columns]
+        if sort_by:
+            presc = presc.sort_values(sort_by, ascending=[True] + [False] * (len(sort_by) - 1))
+    ren = {"page_source": "Page source", "page_cible": "Page cible", "typologie_cible": "Typologie cible",
+           "cluster_cible": "Cluster cible", "position_cible": "Position actuelle (meilleure)",
+           "ancre_recommandee": "Ancre (ce lien)", "ancres_suggerees": "Ancres suggérées (varier)",
+           "ancre_qualite": "Qualité ancre",
+           "emplacement_suggere": "Emplacement", "priorite": "Priorité", "pr_source": "PR source",
+           "match_kw": "Match mot-clé", "potentiel_cible": "Opportunité cible", "deficit_cible": "Déficit cible",
+           "clics_cible": "Clics GSC cible", "vol_cible": "Volume sém. cible (somme mots-clés)",
            "kw_cible": "Mots-clés cibles (volume · position)"}
-    order = ["priorite", "page_cible", "clics_cible", "pos_cible", "kw_cible", "vol_cible", "cluster_cible",
-             "page_source", "ancre_recommandee", "emplacement_suggere", "pr_source", "match_kw",
-             "potentiel_cible", "deficit_cible"]
+    order = ["priorite", "page_cible", "typologie_cible", "position_cible", "clics_cible", "kw_cible",
+             "vol_cible", "cluster_cible", "page_source", "ancre_recommandee", "ancres_suggerees",
+             "ancre_qualite", "emplacement_suggere", "pr_source", "match_kw", "potentiel_cible", "deficit_cible"]
     order = [c for c in order if c in presc.columns]
     presc = presc[order].rename(columns=ren) if len(presc) else presc.rename(columns=ren)
-    end = _write_df(ws, presc, start_row=4)
+    end = _write_df(ws, presc, start_row=4, band=False)  # banding géré par cible ci-dessous
     if "Priorité" in presc.columns:
         pcol = list(presc.columns).index("Priorité") + 1
         pf = {1: RED, 2: ORANGE, 3: GREEN}
@@ -641,30 +815,96 @@ def _sheet_prescriptions(wb, results):
             for cell in row:
                 if cell.value in pf:
                     cell.fill = PatternFill("solid", fgColor=pf[cell.value])
+    # Regroupement visuel par PAGE CIBLE : une même cible reçoit plusieurs liens (plusieurs sources).
+    # On alterne une bande de couleur à chaque changement de cible pour distinguer les blocs d'un coup d'œil.
+    if "Page cible" in presc.columns and len(presc):
+        ccol = list(presc.columns).index("Page cible") + 1
+        band_fill = PatternFill("solid", fgColor=LIGHT)
+        prev, shade = None, False
+        ncols = len(presc.columns)
+        for i, ridx in enumerate(range(5, end)):
+            cur = ws.cell(row=ridx, column=ccol).value
+            if cur != prev:
+                shade = not shade
+                prev = cur
+            if shade:
+                for cc in range(1, ncols + 1):
+                    if cc != pcol:  # ne pas écraser la couleur de priorité
+                        ws.cell(row=ridx, column=cc).fill = band_fill
 
 
-# 6. Analyse par page ------------------------------------------------------
-def _sheet_analyse_page(wb, p):
-    ws = wb.create_sheet("6. Analyse par page")
-    ws["A1"] = "Analyse par page — triée par importance (clics GSC puis volume sémantique)"
+# 4. Mots-clés (croisement direct des termes à pousser) --------------------
+def _sheet_motscles(wb, results):
+    kw = results.get("kw_table")
+    ws = wb.create_sheet("5. Mots-clés")
+    ws["A1"] = "Mots-clés — sur quels termes remonter"
     ws["A1"].font = TITLE_FONT
-    ws["A2"] = "Toutes les pages, les plus importantes en haut. « Orpheline » = aucun lien interne entrant valide."
+    if kw is None or not len(kw):
+        ws["A2"] = ("Cet onglet se remplit avec l'étude sémantique (mot-clé, volume, position, URL cible). "
+                    "Aucune sémantique fournie sur ce run : ajoute-la à l'étape 1 pour croiser les termes à pousser. "
+                    "La Search Console seule donne les clics par page, mais ne relie pas un mot-clé précis à une URL.")
+        ws["A2"].font = Font(italic=True, color=BLUE)
+        ws["A2"].alignment = Alignment(wrap_text=True)
+        ws.column_dimensions["A"].width = 120
+        return
+    ws["A2"] = ("Un mot-clé par ligne, trié par OPPORTUNITÉ (volume x gap de position). "
+                "« À pousser » = position 4 à 20 : proche de la 1re page, c'est là que le maillage paie. "
+                "Filtre la colonne pour isoler les termes à travailler, puis croise avec la page cible.")
     ws["A2"].font = Font(italic=True, color=BLUE)
+    ws["A2"].alignment = Alignment(wrap_text=True)
+
+    d = kw.copy()
+    if "position" in d.columns:
+        d["position"] = pd.to_numeric(d["position"], errors="coerce").round(1)
+    if "a_pousser" in d.columns:
+        d["a_pousser"] = d["a_pousser"].map({True: "OUI", False: ""})
+    ren = {"keyword": "Mot-clé", "volume": "Volume", "position": "Position actuelle",
+           "opp_kw": "Opportunité", "a_pousser": "À pousser (pos 4-20)", "url": "Page cible (arbitrée)",
+           "nb_urls_candidates": "Nb URLs candidates", "cluster": "Cluster", "typologie": "Typologie",
+           "quadrant_code": "Quadrant", "liens_ctx_entrants": "Liens ctx entrants", "pr_interne": "PageRank interne"}
+    cols = [c for c in ["keyword", "volume", "position", "opp_kw", "a_pousser", "url", "nb_urls_candidates",
+                        "cluster", "typologie", "quadrant_code", "liens_ctx_entrants", "pr_interne"] if c in d.columns]
+    df = d[cols].rename(columns=ren)
+    end = _write_df(ws, df, start_row=4)
+    if "À pousser (pos 4-20)" in df.columns:
+        acol = list(df.columns).index("À pousser (pos 4-20)") + 1
+        for row in ws.iter_rows(min_row=5, max_row=end - 1, min_col=acol, max_col=acol):
+            for cell in row:
+                if cell.value == "OUI":
+                    cell.fill = PatternFill("solid", fgColor=GREEN)
+
+
+# 5. Détail par page (page + ancres + problèmes + silotage, fondus) --------
+def _sheet_detail(wb, results, p):
+    ws = wb.create_sheet("6. Détail par page")
+    ws["A1"] = "Détail par page — triée par importance (clics GSC puis volume sémantique)"
+    ws["A1"].font = TITLE_FONT
+    ws["A2"] = ("Toutes les pages, les plus importantes en haut. « Orpheline » = aucun lien interne entrant. "
+                "« Position » = meilleure position connue (GSC/sémantique). Colonnes ancres en % : viser diversité haute, "
+                "dominante et génériques basses. Plus bas : problèmes détaillés et silotage inter-clusters.")
+    ws["A2"].font = Font(italic=True, color=BLUE)
+    ws["A2"].alignment = Alignment(wrap_text=True)
     d = p.copy()
     if "_ancres_txt" not in d.columns:
         d["_ancres_txt"] = "(aucune)"
     d["_orph"] = d["orpheline"].map({True: "OUI", False: ""}) if "orpheline" in d.columns else ""
+    for _src, _dst in [("ratio_diversite_ancres", "_div"), ("part_ancre_dominante", "_dom"),
+                       ("part_ancres_generiques", "_gen")]:
+        d[_dst] = (pd.to_numeric(d.get(_src), errors="coerce") * 100).round(0) if _src in d.columns else ""
+    if "_best_position" in d.columns:
+        d["_pos"] = pd.to_numeric(d["_best_position"], errors="coerce").round(1)
     sort_cols = [c for c in ["clics_gsc", "volume_semantique", "impressions_gsc"] if c in d.columns] or ["score_composite"]
     d = d.sort_values(sort_cols, ascending=False)
-    cols = [c for c in ["url", "cluster", "quadrant_code", "clics_gsc", "impressions_gsc", "volume_semantique",
-            "pr_interne", "depth", "liens_ctx_entrants", "liens_entrants_total", "_orph", "_ancres_txt",
-            "potentiel_business", "deficit_maillage"] if c in d.columns]
-    ren = {"url": "URL", "cluster": "Cluster", "quadrant_code": "Quadrant",
-           "clics_gsc": "Clics GSC", "impressions_gsc": "Impressions GSC", "volume_semantique": "Volume sém.",
-           "pr_interne": "PageRank interne", "depth": "Profondeur", "liens_ctx_entrants": "Liens ctx entrants",
-           "liens_entrants_total": "Liens entrants (tous)", "_orph": "Orpheline",
-           "_ancres_txt": "Ancres utilisées (nb liens)",
-           "potentiel_business": "Potentiel", "deficit_maillage": "Déficit"}
+    cols = [c for c in ["url", "cluster", "typologie", "quadrant_code", "_pos", "clics_gsc", "impressions_gsc",
+            "volume_semantique", "pr_interne", "depth", "liens_ctx_entrants", "liens_entrants_total", "_orph",
+            "_ancres_txt", "_div", "_dom", "_gen", "potentiel_business", "deficit_maillage"] if c in d.columns]
+    ren = {"url": "URL", "cluster": "Cluster", "typologie": "Typologie", "quadrant_code": "Quadrant",
+           "_pos": "Position (meilleure)", "clics_gsc": "Clics GSC", "impressions_gsc": "Impressions GSC",
+           "volume_semantique": "Volume sém.", "pr_interne": "PageRank interne", "depth": "Profondeur",
+           "liens_ctx_entrants": "Liens ctx entrants", "liens_entrants_total": "Liens entrants (tous)",
+           "_orph": "Orpheline", "_ancres_txt": "Ancres utilisées (nb liens)", "_div": "Diversité %",
+           "_dom": "Ancre dominante %", "_gen": "Génériques %",
+           "potentiel_business": "Opportunité", "deficit_maillage": "Déficit"}
     df = d[cols].reset_index(drop=True).rename(columns=ren)
     end = _write_df(ws, df, start_row=4)
     if "Quadrant" in df.columns:
@@ -673,6 +913,9 @@ def _sheet_analyse_page(wb, p):
             for cell in row:
                 if cell.value in QUAD_FILL:
                     cell.fill = QUAD_FILL[cell.value]
+
+    end = _section_problemes(ws, results, p, end + 2)
+    _section_silotage(ws, results, end + 2)
 
 
 # 7. Analyse ancres (en %) -------------------------------------------------
@@ -714,17 +957,16 @@ def _sheet_ancres(wb, p):
                 row[dc - 1].fill = PatternFill("solid", fgColor=ORANGE)
 
 
-# 8. Silotage clusters -----------------------------------------------------
-def _sheet_silotage(wb, results):
-    ws = wb.create_sheet("8. Silotage clusters")
-    ws["A1"] = "Silotage inter-clusters"
-    ws["A1"].font = TITLE_FONT
+# Section Silotage (fondue dans l'onglet Détail) ---------------------------
+def _section_silotage(ws, results, start_row):
+    ws.cell(row=start_row, column=1, value="Silotage inter-clusters").font = TITLE_FONT
     mat = results["silo_matrix_pct"].copy()
-    ws.cell(row=3, column=1, value="Matrice source → cible (% des liens contextuels sortants)").font = SUB_FONT
+    ws.cell(row=start_row + 1, column=1,
+            value="Matrice source → cible (% des liens contextuels sortants)").font = SUB_FONT
     m = mat.reset_index()
     m.columns = ["source \\ cible"] + list(mat.columns)
-    end = _write_df(ws, m, start_row=4, autofilter=False, band=False)
-    for row in ws.iter_rows(min_row=5, max_row=end - 1, min_col=2, max_col=1 + len(mat.columns)):
+    end = _write_df(ws, m, start_row=start_row + 2, autofilter=False, band=False)
+    for row in ws.iter_rows(min_row=start_row + 3, max_row=end - 1, min_col=2, max_col=1 + len(mat.columns)):
         for cell in row:
             if isinstance(cell.value, (int, float)):
                 if cell.value >= 0.85:
@@ -736,4 +978,4 @@ def _sheet_silotage(wb, results):
     flags = results["silo_flags"]
     r2 = end + 2
     ws.cell(row=r2, column=1, value="Diagnostic par cluster").font = SUB_FONT
-    _write_df(ws, flags, start_row=r2 + 1, autofilter=False)
+    return _write_df(ws, flags, start_row=r2 + 1, autofilter=False)
